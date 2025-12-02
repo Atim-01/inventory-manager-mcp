@@ -1,14 +1,17 @@
 import json
 import os
+import sys
 import uuid
 from typing import Dict, List, Optional
 from pydantic import BaseModel, Field
 from datetime import datetime
 
 # FastAPI imports for models, exceptions, and security
-from fastapi import FastAPI, HTTPException, Security, status, Depends 
+from fastapi import FastAPI, HTTPException, Security, status, Depends, Query, Path
 from fastapi.security.api_key import APIKeyHeader
+from fastapi.responses import JSONResponse
 from mcp.server.fastmcp import FastMCP # <-- IMPORT THE MCP FRAMEWORK
+import uvicorn
 
 # --- 1. Pydantic Data Models ---
 class Product(BaseModel):
@@ -207,6 +210,225 @@ async def remove_product(
     
     return
 
-# --- 6. Server Execution ---
+# --- 6. FastAPI REST API Setup ---
+app = FastAPI(
+    title="Inventory Manager API",
+    description="REST API for managing inventory with full CRUD operations",
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc"
+)
+
+# --- 7. REST API Endpoints ---
+
+@app.get("/api/products", 
+         response_model=List[Product],
+         summary="Get all products or search by name",
+         tags=["Products"])
+async def get_products(
+    name: Optional[str] = Query(None, description="Filter products by name (fuzzy match)")
+):
+    """
+    Retrieve all products or search for products by name.
+    
+    - **name**: Optional product name to search for (case-insensitive partial match)
+    - Returns list of matching products
+    """
+    # Reload from file to ensure we have the latest data (in case MCP added products)
+    load_inventory()
+    matches = fuzzy_match_product(name)
+    
+    if not matches and name:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No products found matching '{name}'."
+        )
+    
+    return matches
+
+@app.get("/api/inventory/status",
+         response_model=List[Product],
+         summary="Get inventory status (alias for /api/products)",
+         tags=["Products"])
+async def get_inventory_status(
+    product_name: Optional[str] = Query(None, alias="name", description="Filter products by name (fuzzy match)")
+):
+    """
+    Retrieve inventory status - all products or search by name.
+    This is an alias for /api/products to match MCP tool naming.
+    
+    - **product_name**: Optional product name to search for (case-insensitive partial match)
+    - Returns list of matching products
+    """
+    # Reload from file to ensure we have the latest data (in case MCP added products)
+    load_inventory()
+    matches = fuzzy_match_product(product_name)
+    
+    if not matches and product_name:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No products found matching '{product_name}'."
+        )
+    
+    return matches
+
+@app.get("/api/products/{product_id}",
+         response_model=Product,
+         summary="Get product by ID",
+         tags=["Products"])
+async def get_product_by_id(product_id: str = Path(..., description="Product ID")):
+    """
+    Retrieve a specific product by its ID.
+    
+    - **product_id**: The product ID (e.g., "P-001")
+    """
+    # Reload from file to ensure we have the latest data
+    load_inventory()
+    if product_id not in INVENTORY_DB:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Product with ID '{product_id}' not found."
+        )
+    return INVENTORY_DB[product_id]
+
+@app.post("/api/products",
+          response_model=Product,
+          status_code=status.HTTP_201_CREATED,
+          summary="Add a new product",
+          tags=["Products"])
+async def create_product(product: NewProductRequest):
+    """
+    Add a new product to the inventory.
+    
+    - **name**: Product name
+    - **initial_quantity**: Starting stock quantity
+    - **unit_price**: Price per unit
+    """
+    product_id = "P-" + str(uuid.uuid4()).split('-')[0].upper()
+    
+    new_product = Product(
+        product_id=product_id,
+        name=product.name,
+        quantity=product.initial_quantity,
+        unit_price=product.unit_price
+    )
+    
+    INVENTORY_DB[product_id] = new_product
+    save_inventory()
+    
+    return new_product
+
+@app.patch("/api/products/{product_name}/stock",
+           response_model=Product,
+           summary="Adjust product stock quantity",
+           tags=["Products"])
+async def adjust_stock(
+    product_name: str = Path(..., description="Product name to adjust"),
+    quantity_change: int = Query(..., description="Positive to increase, negative to decrease")
+):
+    """
+    Adjust the stock quantity of a product.
+    
+    - **product_name**: Name of the product (fuzzy match)
+    - **quantity_change**: Amount to change (positive = increase, negative = decrease)
+    """
+    # Reload from file to ensure we have the latest data
+    load_inventory()
+    matches = fuzzy_match_product(product_name)
+    
+    if not matches:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Product not found: '{product_name}'. Cannot adjust stock."
+        )
+    
+    if len(matches) > 1:
+        names = [m.name for m in matches]
+        raise HTTPException(
+            status_code=400,
+            detail=f"Ambiguous product name: '{product_name}' matched multiple items: {names}. Please clarify."
+        )
+    
+    product_to_adjust = matches[0]
+    original_id = product_to_adjust.product_id
+    original_name = product_to_adjust.name
+    
+    new_quantity = product_to_adjust.quantity + quantity_change
+    
+    if new_quantity < 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot process adjustment. Stock level for '{original_name}' would be negative ({new_quantity})."
+        )
+    
+    updated_product = Product(
+        product_id=original_id,
+        name=original_name,
+        quantity=new_quantity,
+        unit_price=product_to_adjust.unit_price
+    )
+    
+    INVENTORY_DB[original_id] = updated_product
+    save_inventory()
+    
+    return updated_product
+
+@app.delete("/api/products/{product_name}",
+            status_code=status.HTTP_204_NO_CONTENT,
+            summary="Remove a product",
+            tags=["Products"])
+async def delete_product(
+    product_name: str = Path(..., description="Product name to remove")
+):
+    """
+    Permanently remove a product from inventory.
+    
+    - **product_name**: Name of the product to remove (fuzzy match)
+    """
+    # Reload from file to ensure we have the latest data
+    load_inventory()
+    matches = fuzzy_match_product(product_name)
+    
+    if not matches:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Product not found: '{product_name}'. Cannot remove."
+        )
+    
+    if len(matches) > 1:
+        names = [m.name for m in matches]
+        raise HTTPException(
+            status_code=400,
+            detail=f"Ambiguous product name: '{product_name}' matched multiple items: {names}. Please clarify."
+        )
+    
+    product_to_remove = matches[0]
+    original_id = product_to_remove.product_id
+    
+    del INVENTORY_DB[original_id]
+    save_inventory()
+    
+    return None
+
+@app.get("/api/health",
+         summary="Health check endpoint",
+         tags=["Health"])
+async def health_check():
+    """Health check endpoint to verify API is running."""
+    return {
+        "status": "healthy",
+        "total_products": len(INVENTORY_DB)
+    }
+
+# --- 8. Server Execution ---
 if __name__ == "__main__":
-    mcp.run(transport="stdio")
+    # Check command line arguments to determine mode
+    if len(sys.argv) > 1 and sys.argv[1] == "http":
+        # Run as HTTP REST API server
+        print("Starting Inventory Manager REST API server...")
+        print("Swagger docs available at: http://localhost:8000/docs")
+        print("API available at: http://localhost:8000/api")
+        uvicorn.run(app, host="0.0.0.0", port=8000)
+    else:
+        # Default: Run as MCP server (stdio) for Claude Desktop
+        mcp.run(transport="stdio")
