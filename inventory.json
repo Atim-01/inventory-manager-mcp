@@ -1,20 +1,26 @@
 {
-    "P-001": {
-      "product_id": "P-001",
-      "name": "Cans of Beer",
-      "quantity": 110,
-      "unit_price": 12.5
-    },
-    "P-002": {
-      "product_id": "P-002",
-      "name": "Bath Towel (White)",
-      "quantity": 150,
-      "unit_price": 25.0
-    },
-    "P-80562C3C": {
-      "product_id": "P-80562C3C",
-      "name": "Coffee Mugs (Black)",
-      "quantity": 25,
-      "unit_price": 8.0
-    }
+  "P-001": {
+    "product_id": "P-001",
+    "name": "Cans of Beer",
+    "quantity": 110,
+    "unit_price": 12.5
+  },
+  "P-002": {
+    "product_id": "P-002",
+    "name": "Bath Towel (White)",
+    "quantity": 150,
+    "unit_price": 25.0
+  },
+  "P-80562C3C": {
+    "product_id": "P-80562C3C",
+    "name": "Coffee Mugs (Black)",
+    "quantity": 25,
+    "unit_price": 8.0
+  },
+  "P-AC5CADB8": {
+    "product_id": "P-AC5CADB8",
+    "name": "Laptop",
+    "quantity": 20,
+    "unit_price": 1200.0
   }
+}
