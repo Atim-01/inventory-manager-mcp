@@ -111,10 +111,7 @@ async def get_inventory_status(
     matches = fuzzy_match_product(product_name)
 
     if not matches and product_name:
-        raise HTTPException(
-            status_code=404, 
-            detail=f"No products found matching '{product_name}'."
-        )
+        raise ValueError(f"No products found matching '{product_name}'.")
         
     return matches
 
@@ -152,11 +149,11 @@ async def adjust_stock_quantity(
     matches = fuzzy_match_product(product_name)
     
     if not matches:
-        raise HTTPException(status_code=404, detail=f"Product not found: '{product_name}'. Cannot adjust stock.")
+        raise ValueError(f"Product not found: '{product_name}'. Cannot adjust stock.")
 
     if len(matches) > 1:
         names = [m.name for m in matches]
-        raise HTTPException(status_code=400, detail=f"Ambiguous product name: '{product_name}' matched multiple items: {names}. Please clarify.")
+        raise ValueError(f"Ambiguous product name: '{product_name}' matched multiple items: {names}. Please clarify.")
 
     product_to_adjust = matches[0]
     original_id = product_to_adjust.product_id
@@ -165,7 +162,7 @@ async def adjust_stock_quantity(
     new_quantity = product_to_adjust.quantity + quantity_change
 
     if new_quantity < 0:
-        raise HTTPException(status_code=400, detail=f"Cannot process adjustment. Stock level for '{original_name}' would be negative ({new_quantity}).")
+        raise ValueError(f"Cannot process adjustment. Stock level for '{original_name}' would be negative ({new_quantity}).")
 
     updated_product = Product(
         product_id=original_id,
@@ -190,17 +187,11 @@ async def remove_product(
     matches = fuzzy_match_product(product_name)
     
     if not matches:
-        raise HTTPException(
-            status_code=404, 
-            detail=f"Product not found: '{product_name}'. Cannot remove."
-        )
+        raise ValueError(f"Product not found: '{product_name}'. Cannot remove.")
 
     if len(matches) > 1:
         names = [m.name for m in matches]
-        raise HTTPException(
-            status_code=400,
-            detail=f"Ambiguous product name: '{product_name}' matched multiple items: {names}. Please clarify."
-        )
+        raise ValueError(f"Ambiguous product name: '{product_name}' matched multiple items: {names}. Please clarify.")
 
     product_to_remove = matches[0]
     original_id = product_to_remove.product_id
@@ -208,7 +199,7 @@ async def remove_product(
     del INVENTORY_DB[original_id]
     save_inventory()
     
-    return
+    return {"status": "success", "message": f"Product '{product_name}' (ID: {original_id}) has been removed from inventory."}
 
 # --- 6. FastAPI REST API Setup ---
 app = FastAPI(
