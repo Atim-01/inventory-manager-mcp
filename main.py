@@ -1,3 +1,18 @@
+"""
+Inventory Management System - MCP Server with REST API
+
+This script implements a dual-mode inventory management system:
+1. MCP (Model Context Protocol) server for Claude Desktop integration
+2. REST API server for HTTP-based access
+
+The system provides full CRUD operations (Create, Read, Update, Delete) for managing
+product inventory with persistent storage in JSON format.
+
+Usage:
+    - MCP mode (default): python main.py
+    - REST API mode: python main.py http
+"""
+
 import json
 import os
 import sys
@@ -6,65 +21,95 @@ from typing import Dict, List, Optional
 from pydantic import BaseModel, Field
 from datetime import datetime
 
-# FastAPI imports for models, exceptions, and security
+# FastAPI imports for REST API functionality
 from fastapi import FastAPI, HTTPException, Security, status, Depends, Query, Path
 from fastapi.security.api_key import APIKeyHeader
 from fastapi.responses import JSONResponse
-from mcp.server.fastmcp import FastMCP # <-- IMPORT THE MCP FRAMEWORK
+from mcp.server.fastmcp import FastMCP  # MCP framework for Claude Desktop integration
 import uvicorn
 
-# --- 1. Pydantic Data Models ---
+# ============================================================================
+# 1. DATA MODELS (Pydantic Schemas)
+# ============================================================================
+# These models define the structure and validation rules for inventory data.
+# Pydantic automatically validates input and generates API documentation.
+
 class Product(BaseModel):
-    # Fixed deprecated Pydantic Field usage
+    """Represents a product in the inventory system."""
     product_id: str = Field(..., json_schema_extra={"example": "P-001"})
     name: str = Field(..., json_schema_extra={"example": "Cans of Beer"})
     quantity: int = Field(..., json_schema_extra={"example": 100})
     unit_price: float = Field(..., json_schema_extra={"example": 12.50})
 
 class NewProductRequest(BaseModel):
+    """Request model for creating a new product (used by REST API)."""
     name: str = Field(..., json_schema_extra={"example": "Coffee Mugs (Black)"})
     initial_quantity: int = Field(..., json_schema_extra={"example": 25})
     unit_price: float = Field(..., json_schema_extra={"example": 8.00})
 
 class AdjustmentRequest(BaseModel):
+    """Request model for stock adjustments (used by REST API)."""
     product_name: str = Field(..., json_schema_extra={"example": "Cans of Beer"}, description="The product name to adjust.")
     quantity_change: int = Field(..., json_schema_extra={"example": 10}, description="Positive to add stock (restock), negative to remove stock (sale/loss).")
 
 
-# --- 2. Data Persistence Layer & Helpers ---
-# Use absolute path based on script location to ensure file is found regardless of working directory
+# ============================================================================
+# 2. DATA PERSISTENCE LAYER
+# ============================================================================
+# Handles loading and saving inventory data to/from a JSON file.
+# Uses absolute paths to ensure the file is found regardless of working directory.
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 INVENTORY_FILE = os.path.join(SCRIPT_DIR, "inventory.json")
-INVENTORY_DB: Dict[str, Product] = {} 
+INVENTORY_DB: Dict[str, Product] = {}  # In-memory database: product_id -> Product 
 
 def load_inventory():
-    """Loads inventory from JSON file on server startup. Removed prints for clean startup."""
+    """
+    Loads inventory data from JSON file into memory.
+    
+    Called on startup and before REST API operations to ensure data consistency.
+    If the file doesn't exist or contains invalid JSON, starts with empty inventory.
+    """
     global INVENTORY_DB
     if os.path.exists(INVENTORY_FILE):
         try:
             with open(INVENTORY_FILE, 'r') as f:
                 data = json.load(f)
+                # Convert JSON dict to Product objects
                 INVENTORY_DB = {k: Product(**v) for k, v in data.items()}
-                # Removed print statement
         except json.JSONDecodeError:
-            # Removed print statement
+            # If file is corrupted, start fresh
             INVENTORY_DB = {}
     else:
+        # File doesn't exist yet - will be created on first save
         pass
 
 def save_inventory():
-    """Saves current INVENTORY_DB to JSON file. Removed print for clean operation."""
+    """
+    Persists current inventory state to JSON file.
+    
+    Called after every modification (create, update, delete) to ensure data persistence.
+    Uses Pydantic's model_dump() to convert Product objects to dictionaries.
+    """
     data_to_save = {k: v.model_dump() for k, v in INVENTORY_DB.items()}
     with open(INVENTORY_FILE, 'w') as f:
         json.dump(data_to_save, f, indent=2)
-    # Removed print statement
 
-# Execute load on application start
+# Load inventory data when the script starts
 load_inventory()
 
-# Helper function for fuzzy searching
 def fuzzy_match_product(query: str) -> List[Product]:
-    """Finds products whose names contain the query string (case-insensitive)."""
+    """
+    Performs case-insensitive partial name matching to find products.
+    
+    Args:
+        query: Product name or partial name to search for. If None/empty, returns all products.
+    
+    Returns:
+        List of Product objects matching the query (empty list if no matches).
+    
+    This enables flexible searching - users don't need exact product names.
+    """
     if not query:
         return list(INVENTORY_DB.values())
 
@@ -75,14 +120,26 @@ def fuzzy_match_product(query: str) -> List[Product]:
     ]
     return matches
 
-# --- 3. Security Setup ---
+# ============================================================================
+# 3. SECURITY CONFIGURATION
+# ============================================================================
+# API key authentication for REST API endpoints (optional - can be removed if not needed).
+# The MCP server doesn't use this - it's only for HTTP REST API access.
+
 API_KEY_NAME = "X-API-Key"
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=True)
 
-# Read from environment variable, for use with Claude Desktop configuration
+# API key is read from environment variable MCP_API_KEY, with a default fallback.
+# In production, always set this via environment variable for security.
 SECRET_API_KEY = os.environ.get("MCP_API_KEY", "super-secret-mcp-key") 
 
 def get_api_key(api_key: str = Security(api_key_header)):
+    """
+    Validates the API key from request headers.
+    
+    This function can be used as a dependency in FastAPI routes to protect endpoints.
+    Currently not used, but available for future security enhancements.
+    """
     if api_key == SECRET_API_KEY:
         return api_key
     raise HTTPException(
@@ -90,23 +147,32 @@ def get_api_key(api_key: str = Security(api_key_header)):
         detail="Invalid or missing API Key",
     )
 
-# --- 4. Core Server Setup (Define MCP instance first) ---
+# ============================================================================
+# 4. MCP SERVER SETUP
+# ============================================================================
+# FastMCP creates an MCP server that Claude Desktop can connect to via stdio.
+# The @mcp.tool() decorator automatically exposes functions as MCP tools.
+
 mcp = FastMCP(
-    "Inventory Manager (Explicit Tools)", 
-    json_response=True 
+    "Inventory Manager (Explicit Tools)",  # Server name shown in Claude Desktop
+    json_response=True  # Use JSON format for responses
 )
 
-# --- 5. Explicit Tool Endpoints (USING @mcp.tool()) ---
+# ============================================================================
+# 5. MCP TOOLS (Exposed to Claude Desktop)
+# ============================================================================
+# These functions are automatically registered as tools that Claude can call.
+# Each tool implements one CRUD operation for inventory management.
 
-## Tool 1: GET (Read/Query) Inventory
 @mcp.tool()
 async def get_inventory_status(
     product_name: Optional[str] = Field(None, description="The name or partial name of the product to search for."), 
-    # API KEY REMOVED TEMPORARILY FOR CONNECTION STABILITY
 ) -> List[Product]:
-    """ 
-    Retrieves the current stock and details for all products or a specific product 
-    using fuzzy matching (The READ operation).
+    """
+    READ operation: Retrieves inventory status for all products or a specific product.
+    
+    Uses fuzzy matching, so partial product names work. If no product_name is provided,
+    returns all products in the inventory.
     """
     matches = fuzzy_match_product(product_name)
 
@@ -115,15 +181,19 @@ async def get_inventory_status(
         
     return matches
 
-## Tool 2: CREATE (Add New Product)
 @mcp.tool()
 async def add_new_product(
     name: str = Field(..., description="The name of the product to add."),
     initial_quantity: int = Field(..., description="The initial stock quantity."),
     unit_price: float = Field(..., description="The price per unit."),
 ) -> Product:
-    """ Adds a completely new item to the store's inventory (The CREATE operation)."""
+    """
+    CREATE operation: Adds a new product to the inventory.
     
+    Automatically generates a unique product ID in the format "P-XXXXX" where XXXXX
+    is the first segment of a UUID. The product is immediately persisted to disk.
+    """
+    # Generate unique product ID using UUID
     product_id = "P-" + str(uuid.uuid4()).split('-')[0].upper()
     
     product = Product(
@@ -134,23 +204,29 @@ async def add_new_product(
     )
     
     INVENTORY_DB[product_id] = product
-    save_inventory() 
+    save_inventory()  # Persist to disk immediately
     
     return product
 
-## Tool 3: UPDATE (Adjust Stock)
 @mcp.tool()
 async def adjust_stock_quantity(
     product_name: str = Field(..., description="The name of the product to adjust."),
     quantity_change: int = Field(..., description="Positive number to increase stock, negative number to decrease stock."),
 ) -> Product:
-    """ Adds or subtracts a quantity from an existing product's stock level (The UPDATE operation)."""
+    """
+    UPDATE operation: Adjusts the stock quantity of an existing product.
     
+    - Use positive numbers to increase stock (restocking)
+    - Use negative numbers to decrease stock (sales, losses)
+    - Prevents stock from going below zero
+    - Requires exact or unique partial product name match
+    """
     matches = fuzzy_match_product(product_name)
     
     if not matches:
         raise ValueError(f"Product not found: '{product_name}'. Cannot adjust stock.")
 
+    # Prevent ambiguity - require unique match
     if len(matches) > 1:
         names = [m.name for m in matches]
         raise ValueError(f"Ambiguous product name: '{product_name}' matched multiple items: {names}. Please clarify.")
@@ -161,6 +237,7 @@ async def adjust_stock_quantity(
 
     new_quantity = product_to_adjust.quantity + quantity_change
 
+    # Business rule: prevent negative stock
     if new_quantity < 0:
         raise ValueError(f"Cannot process adjustment. Stock level for '{original_name}' would be negative ({new_quantity}).")
 
@@ -176,19 +253,22 @@ async def adjust_stock_quantity(
     
     return updated_product
 
-## Tool 4: DELETE (Remove Product)
 @mcp.tool()
 async def remove_product(
-    product_name: str = Field(..., description="The name of the product to remove."), # Query parameter, required
-    # API KEY REMOVED TEMPORARILY FOR CONNECTION STABILITY
+    product_name: str = Field(..., description="The name of the product to remove."),
 ):
-    """ Permanently removes a product from the inventory using fuzzy matching (The DELETE operation)."""
+    """
+    DELETE operation: Permanently removes a product from the inventory.
     
+    Uses fuzzy matching to find the product. Requires unique match to prevent
+    accidental deletion of multiple products. Changes are immediately persisted.
+    """
     matches = fuzzy_match_product(product_name)
     
     if not matches:
         raise ValueError(f"Product not found: '{product_name}'. Cannot remove.")
 
+    # Prevent ambiguity - require unique match
     if len(matches) > 1:
         names = [m.name for m in matches]
         raise ValueError(f"Ambiguous product name: '{product_name}' matched multiple items: {names}. Please clarify.")
@@ -201,16 +281,26 @@ async def remove_product(
     
     return {"status": "success", "message": f"Product '{product_name}' (ID: {original_id}) has been removed from inventory."}
 
-# --- 6. FastAPI REST API Setup ---
+# ============================================================================
+# 6. REST API SERVER SETUP
+# ============================================================================
+# FastAPI application for HTTP-based access to the inventory system.
+# Provides the same CRUD operations as MCP tools, but via standard REST endpoints.
+# Interactive API documentation available at /docs (Swagger UI) and /redoc.
+
 app = FastAPI(
     title="Inventory Manager API",
     description="REST API for managing inventory with full CRUD operations",
     version="1.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc"
+    docs_url="/docs",  # Swagger UI documentation
+    redoc_url="/redoc"  # ReDoc documentation
 )
 
-# --- 7. REST API Endpoints ---
+# ============================================================================
+# 7. REST API ENDPOINTS
+# ============================================================================
+# These endpoints mirror the MCP tools but use HTTP methods (GET, POST, PATCH, DELETE).
+# Each endpoint reloads inventory from disk to ensure consistency between MCP and REST API.
 
 @app.get("/api/products", 
          response_model=List[Product],
@@ -225,7 +315,7 @@ async def get_products(
     - **name**: Optional product name to search for (case-insensitive partial match)
     - Returns list of matching products
     """
-    # Reload from file to ensure we have the latest data (in case MCP added products)
+    # Reload from disk to sync with any changes made via MCP
     load_inventory()
     matches = fuzzy_match_product(name)
     
@@ -246,12 +336,11 @@ async def get_inventory_status(
 ):
     """
     Retrieve inventory status - all products or search by name.
-    This is an alias for /api/products to match MCP tool naming.
+    This is an alias for /api/products to match MCP tool naming convention.
     
     - **product_name**: Optional product name to search for (case-insensitive partial match)
     - Returns list of matching products
     """
-    # Reload from file to ensure we have the latest data (in case MCP added products)
     load_inventory()
     matches = fuzzy_match_product(product_name)
     
@@ -269,11 +358,13 @@ async def get_inventory_status(
          tags=["Products"])
 async def get_product_by_id(product_id: str = Path(..., description="Product ID")):
     """
-    Retrieve a specific product by its ID.
+    Retrieve a specific product by its unique product ID.
+    
+    Unlike the name-based search, this requires the exact product ID (e.g., "P-001").
+    Useful when you know the exact ID from a previous operation.
     
     - **product_id**: The product ID (e.g., "P-001")
     """
-    # Reload from file to ensure we have the latest data
     load_inventory()
     if product_id not in INVENTORY_DB:
         raise HTTPException(
@@ -289,12 +380,16 @@ async def get_product_by_id(product_id: str = Path(..., description="Product ID"
           tags=["Products"])
 async def create_product(product: NewProductRequest):
     """
-    Add a new product to the inventory.
+    CREATE operation: Add a new product to the inventory.
+    
+    Automatically generates a unique product ID. The product is immediately
+    persisted to disk and available for both MCP and REST API access.
     
     - **name**: Product name
     - **initial_quantity**: Starting stock quantity
     - **unit_price**: Price per unit
     """
+    # Generate unique product ID using UUID
     product_id = "P-" + str(uuid.uuid4()).split('-')[0].upper()
     
     new_product = Product(
@@ -318,12 +413,14 @@ async def adjust_stock(
     quantity_change: int = Query(..., description="Positive to increase, negative to decrease")
 ):
     """
-    Adjust the stock quantity of a product.
+    UPDATE operation: Adjust the stock quantity of a product.
+    
+    Uses fuzzy matching to find the product. Prevents negative stock levels.
+    Requires unique product name match to avoid ambiguity.
     
     - **product_name**: Name of the product (fuzzy match)
     - **quantity_change**: Amount to change (positive = increase, negative = decrease)
     """
-    # Reload from file to ensure we have the latest data
     load_inventory()
     matches = fuzzy_match_product(product_name)
     
@@ -333,6 +430,7 @@ async def adjust_stock(
             detail=f"Product not found: '{product_name}'. Cannot adjust stock."
         )
     
+    # Prevent ambiguity - require unique match
     if len(matches) > 1:
         names = [m.name for m in matches]
         raise HTTPException(
@@ -346,6 +444,7 @@ async def adjust_stock(
     
     new_quantity = product_to_adjust.quantity + quantity_change
     
+    # Business rule: prevent negative stock
     if new_quantity < 0:
         raise HTTPException(
             status_code=400,
@@ -372,11 +471,13 @@ async def delete_product(
     product_name: str = Path(..., description="Product name to remove")
 ):
     """
-    Permanently remove a product from inventory.
+    DELETE operation: Permanently remove a product from inventory.
+    
+    Uses fuzzy matching to find the product. Requires unique match to prevent
+    accidental deletion. Changes are immediately persisted.
     
     - **product_name**: Name of the product to remove (fuzzy match)
     """
-    # Reload from file to ensure we have the latest data
     load_inventory()
     matches = fuzzy_match_product(product_name)
     
@@ -386,6 +487,7 @@ async def delete_product(
             detail=f"Product not found: '{product_name}'. Cannot remove."
         )
     
+    # Prevent ambiguity - require unique match
     if len(matches) > 1:
         names = [m.name for m in matches]
         raise HTTPException(
@@ -405,21 +507,32 @@ async def delete_product(
          summary="Health check endpoint",
          tags=["Health"])
 async def health_check():
-    """Health check endpoint to verify API is running."""
+    """
+    Health check endpoint to verify the API is running and accessible.
+    
+    Returns the current status and total number of products in inventory.
+    Useful for monitoring and load balancer health checks.
+    """
     return {
         "status": "healthy",
         "total_products": len(INVENTORY_DB)
     }
 
-# --- 8. Server Execution ---
+# ============================================================================
+# 8. SERVER EXECUTION
+# ============================================================================
+# The script can run in two modes:
+# 1. MCP mode (default): For Claude Desktop integration via stdio
+# 2. HTTP mode: For REST API access via web browser/HTTP client
+
 if __name__ == "__main__":
-    # Check command line arguments to determine mode
     if len(sys.argv) > 1 and sys.argv[1] == "http":
-        # Run as HTTP REST API server
+        # HTTP REST API mode: Run FastAPI server with uvicorn
         print("Starting Inventory Manager REST API server...")
         print("Swagger docs available at: http://localhost:8000/docs")
         print("API available at: http://localhost:8000/api")
         uvicorn.run(app, host="0.0.0.0", port=8000)
     else:
-        # Default: Run as MCP server (stdio) for Claude Desktop
+        # MCP mode (default): Run as stdio server for Claude Desktop
+        # Claude Desktop communicates with MCP servers via standard input/output
         mcp.run(transport="stdio")
