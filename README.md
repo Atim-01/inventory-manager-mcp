@@ -834,25 +834,130 @@ if __name__ == "__main__":
 
 ## Phase 11: Testing and Running
 
-### Step 11.1: Test MCP Mode
+### Step 11.1: Configure Claude Desktop for MCP
+
+**Why:** Connect your MCP server to Claude Desktop so Claude can use your inventory tools.
+
+**Action:**
+
+1. **Locate Claude Desktop Config File:**
+
+   The config file location depends on your operating system:
+   
+   - **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+     - Full path: `C:\Users\YOUR_USERNAME\AppData\Roaming\Claude\claude_desktop_config.json`
+   - **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+   - **Linux:** `~/.config/Claude/claude_desktop_config.json`
+
+2. **Open the Config File:**
+
+   - If the file doesn't exist, create it as a new JSON file
+   - Use a text editor (VS Code, Notepad++, etc.)
+
+3. **Add Your MCP Server Configuration:**
+
+   Add the following JSON structure to the config file. Replace the path with your actual `main.py` location:
+
+   **For Windows (using system Python):**
+   ```json
+   {
+     "mcpServers": {
+       "inventory-manager": {
+         "command": "python",
+         "args": [
+           "C:\\Users\\YOUR_USERNAME\\path\\to\\inventory-mcp\\main.py"
+         ],
+         "env": {
+           "MCP_API_KEY": "super-secret-mcp-key"
+         }
+       }
+     }
+   }
+   ```
+
+   **For Windows (using uv's Python):**
+   ```json
+   {
+     "mcpServers": {
+       "inventory-manager": {
+         "command": ".venv\\Scripts\\python.exe",
+         "args": [
+           "main.py"
+         ],
+         "cwd": "C:\\Users\\YOUR_USERNAME\\path\\to\\inventory-mcp",
+         "env": {
+           "MCP_API_KEY": "super-secret-mcp-key"
+         }
+       }
+     }
+   }
+   ```
+
+   **For macOS/Linux (using system Python):**
+   ```json
+   {
+     "mcpServers": {
+       "inventory-manager": {
+         "command": "python",
+         "args": [
+           "/full/path/to/inventory-mcp/main.py"
+         ],
+         "env": {
+           "MCP_API_KEY": "super-secret-mcp-key"
+         }
+       }
+     }
+   }
+   ```
+
+   **For macOS/Linux (using uv's Python):**
+   ```json
+   {
+     "mcpServers": {
+       "inventory-manager": {
+         "command": ".venv/bin/python",
+         "args": [
+           "main.py"
+         ],
+         "cwd": "/full/path/to/inventory-mcp",
+         "env": {
+           "MCP_API_KEY": "super-secret-mcp-key"
+         }
+       }
+     }
+   }
+   ```
+
+   **Important Notes:**
+   - Replace `YOUR_USERNAME` and paths with your actual values
+   - Use double backslashes (`\\`) in Windows paths
+   - If you already have other MCP servers configured, add `"inventory-manager"` to the existing `mcpServers` object (don't replace it)
+   - The `env` section is optional but useful if you want to use the API key feature
+
+4. **Save and Restart Claude Desktop:**
+
+   - Save the config file
+   - Completely close and restart Claude Desktop
+   - The MCP server should now be available
+
+### Step 11.2: Test MCP Mode
 
 **Why:** Verify MCP server works with Claude Desktop.
 
 **Action:**
 
-1. **Configure Claude Desktop** (if using):
+1. **Verify Connection:**
 
-   - Edit Claude Desktop config file
-   - Add MCP server entry pointing to your script
+   - Open Claude Desktop
+   - The inventory manager tools should appear in Claude's available tools
+   - Try asking Claude: "What products are in the inventory?" or "Add a new product called 'Test Item' with quantity 10 and price 5.99"
 
-2. **Run MCP server:**
+2. **Run MCP server manually (for testing):**
    ```bash
    python main.py
    ```
-
-
    - Server runs in stdio mode (waits for input)
-   - Claude Desktop connects automatically
+   - Claude Desktop connects automatically when configured
 
 ### Step 11.2: Test REST API Mode
 
@@ -900,6 +1005,7 @@ curl -X PATCH "http://localhost:8000/api/products/Test%20Product/stock?quantity_
 # Delete product
 curl -X DELETE "http://localhost:8000/api/products/Test%20Product"
 ```
+
 
 ---
 
